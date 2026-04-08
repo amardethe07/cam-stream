@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CamStream — Viewer</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{--bg:#07080f;--surface:#0f101a;--border:#1a1b2e;--accent:#00e5ff;--accent2:#ff3366;--text:#dde0f0;--muted:#44475a;}
+  body{background:var(--bg);color:var(--text);font-family:'Space Mono',monospace;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:14px;gap:12px;}
+  .header{width:100%;max-width:860px;display:flex;justify-content:space-between;align-items:center;padding-bottom:12px;border-bottom:1px solid var(--border);}
+  .logo{font-family:'Syne',sans-serif;font-size:22px;font-weight:800;letter-spacing:-1px}
+  .logo span{color:var(--accent)}
+  .tag{font-size:10px;color:var(--muted);letter-spacing:3px}
+  #waiting{width:100%;max-width:860px;aspect-ratio:16/9;background:var(--surface);border:1px solid var(--border);border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;}
+  .spinner{width:36px;height:36px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .wait-text{font-size:11px;color:var(--muted);letter-spacing:3px}
+
+  /* VIDEO + CLOCK CANVAS OVERLAY */
+  #video-container{width:100%;max-width:860px;aspect-ratio:16/9;background:#000;border-radius:14px;overflow:hidden;border:1px solid var(--border);position:relative;display:none;}
+  video{width:100%;height:100%;object-fit:contain;background:#000;display:block;position:absolute;top:0;left:0;}
+  #viewer-canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:3;}
+
+  /* Volume control */
+  .vol-bar{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center;background:rgba(0,0,0,0.65);padding:7px 14px;border-radius:30px;z-index:4;pointer-events:all;}
+  .vol-bar label{font-size:10px;color:var(--muted)}
+  input[type=range]{-webkit-appearance:none;width:90px;height:3px;background:var(--muted);border-radius:2px;outline:none;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent);cursor:pointer;}
+  .mute-btn{background:none;border:none;color:var(--text);font-size:15px;cursor:pointer;}
+  .fs-btn{position:absolute;bottom:14px;right:12px;background:rgba(0,0,0,0.65);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:5px 9px;cursor:pointer;z-index:4;}
+
+  .info-panel{width:100%;max-width:860px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;}
+  .info-item{display:flex;flex-direction:column;gap:2px}
+  .info-item .lbl{font-size:9px;color:var(--muted);letter-spacing:2px}
+  .info-item .val{font-size:13px;color:var(--accent)}
+
+  /* Latency meter */
+  .latency-good{color:#00ff88!important}
+  .latency-ok{color:#ffcc00!important}
+  .latency-bad{color:#ff3366!important}
+
+  .log{width:100%;max-width:860px;background:#000;border:1px solid var(--border);border-radius:10px;padding:10px;font-size:10px;color:var(--muted);height:68px;overflow-y:auto;line-height:1.6;}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">Cam<span>Stream</span></div>
+  <div class="tag">VIEWER · REALTIME</div>
+</div>
+
+<div id="waiting">
+  <div class="spinner"></div>
+  <div class="wait-text" id="wait-text">CONNECTING...</div>
+</div>
+
+<div id="video-container">
+  <video id="remoteVideo" autoplay playsinline></video>
+  <canvas id="viewer-canvas"></canvas>
+  <div class="vol-bar">
+    <button class="mute-btn" id="muteBtn" onclick="toggleMute()">🔊</button>
+    <label>VOL</label>
+    <input type="range" id="volume" min="0" max="1" step="0.05" value="1"
+      oninput="document.getElementById('remoteVideo').volume=this.value"/>
+  </div>
+  <button class="fs-btn" onclick="goFS()">⛶</button>
+</div>
+
+<div class="info-panel">
+  <div class="info-item"><div class="lbl">STATUS</div><div class="val" id="s-status">–</div></div>
+  <div class="info-item"><div class="lbl">LATENCY</div><div class="val" id="s-latency">–</div></div>
+  <div class="info-item"><div class="lbl">FPS</div><div class="val" id="s-fps">–</div></div>
+  <div class="info-item"><div class="lbl">RESOLUTION</div><div class="val" id="s-res">–</div></div>
+  <div class="info-item"><div class="lbl">BITRATE</div><div class="val" id="s-bitrate">–</div></div>
+  <div class="info-item"><div class="lbl">VIEWER TIME</div><div class="val" id="s-clock">–</div></div>
+</div>
+
+<div class="log" id="log"></div>
+
+<script>
+const WS_URL=`${location.protocol==='https:'?'wss':'ws'}://${location.host}`;
+const ICE_SERVERS=[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}];
+const RTC_CONFIG={iceServers:ICE_SERVERS,bundlePolicy:'max-bundle',rtcpMuxPolicy:'require',iceCandidatePoolSize:10};
+
+let ws,pc,muted=false,statsInterval,animFrame2;
+const vcanvas=document.getElementById('viewer-canvas');
+const vctx=vcanvas.getContext('2d');
+const remoteVideo=document.getElementById('remoteVideo');
+
+// ── VIEWER REALTIME CLOCK OVERLAY ─────────────────────────────────
+function drawViewerOverlay(){
+  const W=vcanvas.offsetWidth,H=vcanvas.offsetHeight;
+  if(vcanvas.width!==W||vcanvas.height!==H){vcanvas.width=W;vcanvas.height=H;}
+  vctx.clearRect(0,0,W,H);
+  const now=new Date();
+  const hh=String(now.getHours()).padStart(2,'0');
+  const mm=String(now.getMinutes()).padStart(2,'0');
+  const ss=String(now.getSeconds()).padStart(2,'0');
+  const ms=String(now.getMilliseconds()).padStart(3,'0');
+
+  // Top bar overlay
+  vctx.fillStyle='rgba(0,0,0,0.4)';
+  vctx.fillRect(0,0,W,H*0.12);
+  vctx.fillStyle='rgba(0,0,0,0.4)';
+  vctx.fillRect(0,H*0.92,W,H);
+
+  vctx.shadowColor='rgba(0,0,0,0.95)';
+  vctx.shadowBlur=8;
+
+  // LIVE badge — top left
+  const blink=Math.floor(Date.now()/500)%2===0;
+  vctx.font=`bold ${Math.round(W*0.022)}px 'Space Mono',monospace`;
+  vctx.fillStyle=blink?'#ff3366':'rgba(255,51,102,0.5)';
+  vctx.textAlign='left';
+  vctx.fillText('● LIVE',12,Math.round(H*0.055));
+
+  // Viewer clock — top right  
+  vctx.font=`bold ${Math.round(W*0.026)}px 'Space Mono',monospace`;
+  vctx.fillStyle='#00e5ff';
+  vctx.textAlign='right';
+  vctx.fillText(`${hh}:${mm}:${ss}.${ms}`,W-12,Math.round(H*0.056));
+
+  // Date — below clock
+  const dateStr=now.toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short',year:'numeric'}).toUpperCase();
+  vctx.font=`${Math.round(W*0.018)}px 'Space Mono',monospace`;
+  vctx.fillStyle='rgba(255,255,255,0.5)';
+  vctx.fillText(dateStr,W-12,Math.round(H*0.082));
+
+  // Bottom: latency + label
+  const latEl=document.getElementById('s-latency');
+  const latText=latEl.textContent!=='–'?`⚡ ${latEl.textContent}`:'⚡ CONNECTING';
+  vctx.shadowBlur=6;
+  vctx.font=`${Math.round(W*0.018)}px 'Space Mono',monospace`;
+  vctx.fillStyle='rgba(0,229,255,0.75)';
+  vctx.textAlign='left';
+  vctx.fillText(latText,10,H-10);
+  vctx.textAlign='right';
+  vctx.fillStyle='rgba(255,255,255,0.3)';
+  vctx.fillText('CAMSTREAM VIEWER',W-10,H-10);
+
+  // ms bar
+  vctx.shadowBlur=0;
+  const barW=(now.getMilliseconds()/999)*W;
+  vctx.fillStyle='rgba(0,229,255,0.1)';
+  vctx.fillRect(0,H-4,W,4);
+  vctx.fillStyle='#00e5ff';
+  vctx.fillRect(0,H-4,barW,4);
+
+  // Update clock in info panel
+  document.getElementById('s-clock').textContent=`${hh}:${mm}:${ss}`;
+
+  animFrame2=requestAnimationFrame(drawViewerOverlay);
+}
+
+function log(msg){const el=document.getElementById('log');el.innerHTML+=`<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;el.scrollTop=el.scrollHeight;}
+function setS(id,val){document.getElementById(id).textContent=val;}
+
+function connectWS(){
+  ws=new WebSocket(WS_URL);
+  ws.onopen=()=>{ws.send(JSON.stringify({type:'register-viewer'}));setS('s-status','CONNECTED');log('Server connected');};
+  ws.onclose=()=>{setS('s-status','DISCONNECTED');log('WS closed — retry in 3s');setTimeout(connectWS,3000);};
+  ws.onerror=()=>{log('WS error');};
+  ws.onmessage=async(e)=>{
+    const msg=JSON.parse(e.data);
+    if(msg.type==='streamer-ready'){log('Streamer online!');ws.send(JSON.stringify({type:'viewer-ready'}));setS('s-status','NEGOTIATING');}
+    else if(msg.type==='streamer-offline'){setS('s-status','WAITING');document.getElementById('wait-text').textContent='WAITING FOR STREAMER...';document.getElementById('waiting').style.display='flex';document.getElementById('video-container').style.display='none';cancelAnimationFrame(animFrame2);}
+    else if(msg.type==='offer'){await handleOffer(msg.sdp);}
+    else if(msg.type==='ice-candidate'&&pc){try{await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));}catch{}}
+  };
+}
+
+async function handleOffer(sdp){
+  log('Offer received — connecting...');
+  pc=new RTCPeerConnection(RTC_CONFIG);
+  pc.ontrack=(e)=>{
+    log('Stream received ▶ LOW LATENCY MODE');
+    remoteVideo.srcObject=e.streams[0];
+
+    // ── KEY: force low latency playback ───────────────────────
+    remoteVideo.play().catch(()=>{});
+    // Remove buffering — seek to live edge constantly
+    remoteVideo.addEventListener('progress',()=>{
+      if(remoteVideo.buffered.length){
+        const end=remoteVideo.buffered.end(remoteVideo.buffered.length-1);
+        const diff=end-remoteVideo.currentTime;
+        if(diff>0.5) remoteVideo.currentTime=end-0.1; // snap to live edge
+      }
+    });
+
+    document.getElementById('waiting').style.display='none';
+    document.getElementById('video-container').style.display='block';
+    setS('s-status','LIVE ●');
+    drawViewerOverlay();
+    startStats();
+  };
+  pc.onicecandidate=(e)=>{if(e.candidate) ws.send(JSON.stringify({type:'ice-candidate',candidate:e.candidate}));};
+  pc.onconnectionstatechange=()=>{
+    const s=pc.connectionState;
+    log('Peer: '+s);
+    if(s==='connected') setS('s-status','LIVE ●');
+    else if(s==='failed'){log('Connection failed — reconnecting...');setTimeout(connectWS,2000);}
+  };
+
+  await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  const answer=await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  ws.send(JSON.stringify({type:'answer',sdp:answer}));
+  log('Answer sent ✓');
+}
+
+// ── REAL-TIME STATS ───────────────────────────────────────────────
+function startStats(){
+  let lastBytes=0,lastTs=Date.now();
+  statsInterval=setInterval(async()=>{
+    if(!pc) return;
+    const stats=await pc.getStats();
+    stats.forEach(r=>{
+      if(r.type==='inbound-rtp'&&r.kind==='video'){
+        if(r.framesPerSecond) setS('s-fps',r.framesPerSecond.toFixed(0)+' fps');
+        if(r.frameWidth) setS('s-res',`${r.frameWidth}×${r.frameHeight}`);
+        const now=Date.now();
+        const bps=((r.bytesReceived-lastBytes)*8)/((now-lastTs)/1000);
+        lastBytes=r.bytesReceived;lastTs=now;
+        setS('s-bitrate',(bps/1000).toFixed(0)+' kbps');
+      }
+      if(r.type==='candidate-pair'&&r.state==='succeeded'&&r.currentRoundTripTime!==undefined){
+        const latMs=Math.round(r.currentRoundTripTime*1000);
+        const el=document.getElementById('s-latency');
+        el.textContent=latMs+'ms';
+        el.className='val '+(latMs<100?'latency-good':latMs<300?'latency-ok':'latency-bad');
+      }
+    });
+  },500); // update every 500ms for snappy stats
+}
+
+function toggleMute(){muted=!muted;remoteVideo.muted=muted;document.getElementById('muteBtn').textContent=muted?'🔇':'🔊';}
+function goFS(){const c=document.getElementById('video-container');(c.requestFullscreen||c.webkitRequestFullscreen||c.mozRequestFullScreen).call(c);}
+
+connectWS();
+</script>
+</body>
+</html>

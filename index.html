@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CamStream — Anywhere Camera</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@700;800;900&display=swap" rel="stylesheet"/>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:#07080f;
+    color:#dde0f0;
+    font-family:'Space Mono',monospace;
+    min-height:100vh;
+    display:flex;flex-direction:column;
+    align-items:center;justify-content:center;
+    padding:24px;gap:32px;
+  }
+  .logo{
+    font-family:'Syne',sans-serif;
+    font-size:clamp(40px,10vw,80px);
+    font-weight:900;
+    letter-spacing:-4px;
+    line-height:1;
+  }
+  .logo span{color:#00e5ff}
+  .sub{font-size:11px;color:#44475a;letter-spacing:4px;text-align:center;margin-top:8px}
+  .cards{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;width:100%;max-width:600px}
+  .card{
+    flex:1;min-width:220px;
+    background:#0f101a;
+    border:1px solid #1a1b2e;
+    border-radius:20px;
+    padding:32px 24px;
+    text-align:center;
+    text-decoration:none;
+    color:inherit;
+    transition:all 0.3s;
+    display:flex;flex-direction:column;gap:12px;align-items:center;
+  }
+  .card:hover{border-color:#00e5ff;transform:translateY(-4px);box-shadow:0 20px 40px rgba(0,229,255,0.1)}
+  .card.viewer:hover{border-color:#ff3366;box-shadow:0 20px 40px rgba(255,51,102,0.1)}
+  .icon{font-size:36px}
+  .card-title{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;letter-spacing:-1px}
+  .card-desc{font-size:10px;color:#44475a;letter-spacing:1px;line-height:1.8}
+  .arrow{color:#00e5ff;font-size:18px;margin-top:4px}
+  .card.viewer .arrow{color:#ff3366}
+  .status-row{
+    font-size:10px;color:#44475a;letter-spacing:2px;
+    padding:8px 16px;
+    border:1px solid #1a1b2e;
+    border-radius:30px;
+  }
+  .status-row span{color:#00e5ff}
+</style>
+</head>
+<body>
+  <div>
+    <div class="logo">Cam<span>Stream</span></div>
+    <div class="sub">LIVE FROM YOUR PHONE · ANYWHERE · INSTANT</div>
+  </div>
+  <div class="cards">
+    <a href="/streamer.html" class="card">
+      <div class="icon">📱</div>
+      <div class="card-title">STREAMER</div>
+      <div class="card-desc">OPEN ON YOUR PHONE<br/>SHARE YOUR CAMERA<br/>TO THE WORLD</div>
+      <div class="arrow">→</div>
+    </a>
+    <a href="/viewer.html" class="card viewer">
+      <div class="icon">👁</div>
+      <div class="card-title">VIEWER</div>
+      <div class="card-desc">OPEN ANYWHERE<br/>WATCH THE LIVE FEED<br/>REAL-TIME</div>
+      <div class="arrow">→</div>
+    </a>
+  </div>
+  <div class="status-row">SIGNAL SERVER: <span id="s">CHECKING...</span></div>
+  <script>
+    fetch('/status').then(r=>r.json()).then(d=>{
+      document.getElementById('s').textContent = `STREAMER ${d.streamer.toUpperCase()} · ${d.viewers} VIEWERS`;
+    }).catch(()=>document.getElementById('s').textContent='UNKNOWN');
+  </script>
+</body>
+</html>

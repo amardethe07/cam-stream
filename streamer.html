@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<title>CamStream — Streamer</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{--bg:#0a0a0f;--surface:#12121a;--border:#1e1e2e;--accent:#00ff88;--accent2:#ff3366;--text:#e0e0f0;--muted:#555570;}
+  body{background:var(--bg);color:var(--text);font-family:'Space Mono',monospace;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:12px;gap:12px;}
+  .header{width:100%;display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);}
+  .logo{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;letter-spacing:-1px}
+  .logo span{color:var(--accent)}
+  .badge{font-size:10px;padding:4px 10px;border:1px solid var(--muted);border-radius:20px;color:var(--muted);letter-spacing:2px;}
+  .badge.live{border-color:var(--accent2);color:var(--accent2);animation:pulse 1s infinite;}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+  #video-wrap{width:100%;max-width:480px;aspect-ratio:9/16;background:#000;border-radius:14px;overflow:hidden;border:1px solid var(--border);position:relative;}
+  #overlay-canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;}
+  video{width:100%;height:100%;object-fit:cover;display:block;position:absolute;top:0;left:0;}
+  .controls{width:100%;max-width:480px;display:flex;gap:8px;flex-wrap:wrap;}
+  .btn{flex:1;padding:13px;border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:10px;font-family:'Space Mono',monospace;font-size:11px;cursor:pointer;transition:all 0.2s;letter-spacing:1px;min-width:100px;text-align:center;}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.primary{background:var(--accent);color:#000;border-color:var(--accent);font-weight:700;}
+  .btn.danger{background:var(--accent2);color:#fff;border-color:var(--accent2);}
+  .btn:disabled{opacity:0.35;cursor:not-allowed}
+  .status-panel{width:100%;max-width:480px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;}
+  .status-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px;}
+  .status-row:last-child{border-bottom:none}
+  .status-row span:first-child{color:var(--muted)}
+  .status-val{color:var(--accent)}
+  .log{width:100%;max-width:480px;background:#000;border:1px solid var(--border);border-radius:10px;padding:10px;font-size:10px;color:var(--muted);height:72px;overflow-y:auto;line-height:1.6;}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">Cam<span>Stream</span></div>
+  <div class="badge" id="status-badge">OFFLINE</div>
+</div>
+
+<div id="video-wrap">
+  <video id="localVideo" autoplay muted playsinline></video>
+  <canvas id="overlay-canvas"></canvas>
+</div>
+
+<div class="controls">
+  <button class="btn primary" id="startBtn" onclick="startStream()">▶ START</button>
+  <button class="btn" id="flipBtn" onclick="flipCamera()" disabled>⟳ FLIP</button>
+  <button class="btn danger" id="stopBtn" onclick="stopStream()" disabled>■ STOP</button>
+</div>
+
+<div class="status-panel">
+  <div class="status-row"><span>STATUS</span><span class="status-val" id="conn-status">–</span></div>
+  <div class="status-row"><span>VIEWERS</span><span class="status-val" id="peer-count">0</span></div>
+  <div class="status-row"><span>RESOLUTION</span><span class="status-val" id="resolution">–</span></div>
+  <div class="status-row"><span>LATENCY MODE</span><span class="status-val">ULTRA-LOW ⚡</span></div>
+  <div class="status-row"><span>BACKGROUND</span><span class="status-val" id="bg-status">STANDBY</span></div>
+</div>
+<div class="log" id="log"></div>
+
+<script>
+const WS_URL=`${location.protocol==='https:'?'wss':'ws'}://${location.host}`;
+const ICE_SERVERS=[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}];
+const RTC_CONFIG={iceServers:ICE_SERVERS,bundlePolicy:'max-bundle',rtcpMuxPolicy:'require',iceCandidatePoolSize:10};
+
+let ws,localStream,peerConnections={},facingMode='environment',viewerCount=0,animFrame;
+let wakeLock=null, silentAudio=null, audioCtx=null;
+const canvas=document.getElementById('overlay-canvas');
+const ctx=canvas.getContext('2d');
+const video=document.getElementById('localVideo');
+
+// ── REALTIME CLOCK CANVAS OVERLAY ────────────────────────────────
+function drawOverlay(){
+  const W=canvas.offsetWidth, H=canvas.offsetHeight;
+  if(canvas.width!==W||canvas.height!==H){canvas.width=W;canvas.height=H;}
+  ctx.clearRect(0,0,W,H);
+  const now=new Date();
+
+  // Semi-transparent top bar
+  ctx.fillStyle='rgba(0,0,0,0.45)';
+  ctx.fillRect(0,0,W,H*0.14);
+
+  // Semi-transparent bottom bar
+  ctx.fillStyle='rgba(0,0,0,0.45)';
+  ctx.fillRect(0,H*0.91,W,H);
+
+  ctx.shadowColor='rgba(0,0,0,0.95)';
+  ctx.shadowBlur=10;
+
+  // ── BIG TIME — HH:MM:SS ──────────────────────────────────────
+  const hh=String(now.getHours()).padStart(2,'0');
+  const mm=String(now.getMinutes()).padStart(2,'0');
+  const ss=String(now.getSeconds()).padStart(2,'0');
+  const ms=String(now.getMilliseconds()).padStart(3,'0');
+
+  ctx.font=`bold ${Math.round(W*0.092)}px 'Space Mono',monospace`;
+  ctx.fillStyle='#00ff88';
+  ctx.textAlign='left';
+  ctx.fillText(`${hh}:${mm}:${ss}`,12,Math.round(H*0.076));
+
+  // Milliseconds — smaller, right of colon
+  ctx.font=`bold ${Math.round(W*0.048)}px 'Space Mono',monospace`;
+  ctx.fillStyle='rgba(0,255,136,0.65)';
+  const timeW=ctx.measureText(`${hh}:${mm}:${ss}`).width;
+  // actually measure with big font
+  ctx.font=`bold ${Math.round(W*0.092)}px 'Space Mono',monospace`;
+  const bigW=ctx.measureText(`${hh}:${mm}:${ss}`).width;
+  ctx.font=`bold ${Math.round(W*0.042)}px 'Space Mono',monospace`;
+  ctx.fillText(`.${ms}`,12+bigW+2,Math.round(H*0.072));
+
+  // ── DATE ─────────────────────────────────────────────────────
+  const dateStr=now.toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short',year:'numeric'}).toUpperCase();
+  ctx.font=`${Math.round(W*0.036)}px 'Space Mono',monospace`;
+  ctx.fillStyle='rgba(255,255,255,0.65)';
+  ctx.fillText(dateStr,14,Math.round(H*0.112));
+
+  // ── LIVE BADGE — top right ───────────────────────────────────
+  const isLive=document.getElementById('status-badge').classList.contains('live');
+  if(isLive){
+    const blink=Math.floor(Date.now()/500)%2===0;
+    ctx.font=`bold ${Math.round(W*0.044)}px 'Space Mono',monospace`;
+    ctx.fillStyle=blink?'#ff3366':'rgba(255,51,102,0.4)';
+    ctx.textAlign='right';
+    ctx.fillText('● LIVE',W-12,Math.round(H*0.058));
+    ctx.font=`${Math.round(W*0.032)}px 'Space Mono',monospace`;
+    ctx.fillStyle='rgba(255,255,255,0.55)';
+    ctx.fillText(`👁 ${viewerCount}`,W-12,Math.round(H*0.094));
+  }
+
+  // ── MS PROGRESS BAR — bottom ─────────────────────────────────
+  ctx.shadowBlur=0;
+  const barFill=(now.getMilliseconds()/999)*W;
+  ctx.fillStyle='rgba(0,255,136,0.12)';
+  ctx.fillRect(0,H-5,W,5);
+  ctx.fillStyle='#00ff88';
+  ctx.fillRect(0,H-5,barFill,5);
+
+  // ── PRECISE BOTTOM LABEL ─────────────────────────────────────
+  ctx.shadowColor='rgba(0,0,0,0.9)';ctx.shadowBlur=6;
+  ctx.font=`${Math.round(W*0.030)}px 'Space Mono',monospace`;
+  ctx.fillStyle='rgba(0,255,136,0.75)';
+  ctx.textAlign='left';
+  ctx.fillText(`⚡ REALTIME · ${hh}:${mm}:${ss}.${ms}`,10,H-10);
+  ctx.textAlign='right';
+  ctx.fillStyle='rgba(255,255,255,0.35)';
+  ctx.fillText('CAMSTREAM',W-10,H-10);
+
+  animFrame=requestAnimationFrame(drawOverlay);
+}
+
+function log(msg){const el=document.getElementById('log');el.innerHTML+=`<div>[${new Date().toLocaleTimeString()}] ${msg}</div>`;el.scrollTop=el.scrollHeight;}
+function setStatus(t){const b=document.getElementById('status-badge');b.textContent=t;b.className='badge'+(t==='LIVE'?' live':'');document.getElementById('conn-status').textContent=t;}
+
+async function startStream(){
+  log('Requesting camera...');
+  try{
+    localStream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode,width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:60}},
+      audio:{echoCancellation:true,noiseSuppression:true}
+    });
+    video.srcObject=localStream;
+    await new Promise(r=>{video.onloadedmetadata=r;});
+    const s=localStream.getVideoTracks()[0].getSettings();
+    document.getElementById('resolution').textContent=`${s.width}×${s.height} @${Math.round(s.frameRate||30)}fps`;
+    log(`Camera ✓ ${s.width}×${s.height}`);
+    drawOverlay();
+    connectWS();
+    enableBackgroundMode();
+    document.getElementById('startBtn').disabled=true;
+    document.getElementById('flipBtn').disabled=false;
+    document.getElementById('stopBtn').disabled=false;
+  }catch(e){log('Error: '+e.message);setStatus('ERROR');}
+}
+
+function connectWS(){
+  ws=new WebSocket(WS_URL);
+  ws.onopen=()=>{ws.send(JSON.stringify({type:'register-streamer'}));setStatus('LIVE');log('Server connected ✓');};
+  ws.onclose=()=>{setStatus('DISCONNECTED');log('WS closed');};
+  ws.onerror=()=>{log('WS error');};
+  ws.onmessage=async(e)=>{
+    const msg=JSON.parse(e.data);
+    if(msg.type==='new-viewer') await handleNewViewer(msg.viewerId);
+    else if(msg.type==='answer') await handleAnswer(msg);
+    else if(msg.type==='ice-candidate') await handleRemoteICE(msg);
+  };
+}
+
+async function handleNewViewer(viewerId){
+  log(`Viewer joined: ${viewerId}`);
+  const pc=new RTCPeerConnection(RTC_CONFIG);
+  peerConnections[viewerId]=pc;
+  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+
+  // Tune sender for low latency
+  pc.getSenders().forEach(async sender=>{
+    if(sender.track&&sender.track.kind==='video'){
+      const p=sender.getParameters();
+      if(!p.encodings||!p.encodings.length) p.encodings=[{}];
+      p.encodings[0].maxBitrate=3_000_000;
+      p.encodings[0].networkPriority='high';
+      try{await sender.setParameters(p);}catch{}
+    }
+  });
+
+  pc.onicecandidate=(e)=>{if(e.candidate) ws.send(JSON.stringify({type:'ice-candidate',candidate:e.candidate}));};
+  pc.onconnectionstatechange=()=>{
+    const s=pc.connectionState;
+    log(`Viewer ${viewerId}: ${s}`);
+    if(s==='connected'){viewerCount++;updateViewers();}
+    else if(['disconnected','failed','closed'].includes(s)){viewerCount=Math.max(0,viewerCount-1);updateViewers();}
+  };
+
+  const offer=await pc.createOffer();
+  offer.sdp=patchSDP(offer.sdp);
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({type:'offer',sdp:offer,viewerId}));
+}
+
+// ══════════════════════════════════════════════════════════════════
+// BACKGROUND / LOCK SCREEN PREVENTION — 3 LAYER SYSTEM
+// ══════════════════════════════════════════════════════════════════
+
+async function enableBackgroundMode(){
+  // LAYER 1 — Wake Lock API (keeps screen on)
+  await requestWakeLock();
+
+  // LAYER 2 — Silent Audio Loop (keeps browser alive when screen locked)
+  startSilentAudio();
+
+  // LAYER 3 — Visibility change handler (recover if backgrounded)
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
+  log('🔒 Background mode: ACTIVE');
+  document.getElementById('bg-status').textContent='ACTIVE ✓';
+  document.getElementById('bg-status').style.color='#00ff88';
+}
+
+// ── LAYER 1: Screen Wake Lock ─────────────────────────────────────
+async function requestWakeLock(){
+  try{
+    if('wakeLock' in navigator){
+      wakeLock=await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release',()=>{
+        log('Wake lock released — re-acquiring...');
+        // Auto re-acquire after 1s
+        setTimeout(requestWakeLock,1000);
+      });
+      log('Wake lock acquired ✓');
+    } else {
+      log('Wake Lock API not supported — using audio fallback');
+    }
+  } catch(e){
+    log('Wake lock failed: '+e.message);
+  }
+}
+
+// ── LAYER 2: Silent Audio Loop ────────────────────────────────────
+// Plays inaudible oscillator — tricks browser into keeping page alive
+// even after screen lock on Android Chrome
+function startSilentAudio(){
+  try{
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    const oscillator=audioCtx.createOscillator();
+    const gainNode=audioCtx.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    // Volume = 0.0001 — completely inaudible but "playing"
+    gainNode.gain.value=0.0001;
+    oscillator.frequency.value=440;
+    oscillator.type='sine';
+    oscillator.start();
+
+    // Also create a looping silent buffer as backup
+    _startSilentBuffer(audioCtx);
+
+    log('Silent audio loop started ✓');
+  } catch(e){
+    log('Audio context error: '+e.message);
+  }
+}
+
+function _startSilentBuffer(ctx){
+  // 2-second silent buffer that loops forever
+  const bufferSize=ctx.sampleRate*2;
+  const buffer=ctx.createBuffer(1,bufferSize,ctx.sampleRate);
+  const source=ctx.createBufferSource();
+  source.buffer=buffer;
+  source.loop=true;
+  source.connect(ctx.destination);
+  source.start();
+}
+
+// ── LAYER 3: Visibility Recovery ─────────────────────────────────
+// When user returns to browser after locking phone —
+// check stream is still alive, if not reconnect automatically
+async function onVisibilityChange(){
+  if(document.visibilityState==='visible'){
+    log('App foregrounded — checking stream health...');
+    document.getElementById('bg-status').textContent='CHECKING...';
+    document.getElementById('bg-status').style.color='#ffcc00';
+
+    // Re-acquire wake lock (it gets released when page hidden)
+    await requestWakeLock();
+
+    // Resume audio context (browsers suspend it when backgrounded)
+    if(audioCtx && audioCtx.state==='suspended'){
+      await audioCtx.resume();
+      log('Audio context resumed ✓');
+    }
+
+    // Check if video track is still live
+    if(localStream){
+      const vt=localStream.getVideoTracks()[0];
+      if(!vt || vt.readyState==='ended'){
+        log('Video track died — restarting camera...');
+        await restartCamera();
+      } else {
+        log('Stream still alive ✓');
+        document.getElementById('bg-status').textContent='ACTIVE ✓';
+        document.getElementById('bg-status').style.color='#00ff88';
+      }
+    }
+
+    // Check WebSocket
+    if(!ws || ws.readyState!==WebSocket.OPEN){
+      log('WS dropped — reconnecting...');
+      connectWS();
+    }
+
+  } else {
+    // Going to background
+    log('App backgrounded — background mode holding...');
+    document.getElementById('bg-status').textContent='BACKGROUND ⚡';
+    document.getElementById('bg-status').style.color='#ffcc00';
+  }
+}
+
+// Restart camera if track died in background
+async function restartCamera(){
+  try{
+    const ns=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode,width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}},
+      audio:{echoCancellation:true,noiseSuppression:true}
+    });
+    video.srcObject=ns;
+    const nt=ns.getVideoTracks()[0];
+    Object.values(peerConnections).forEach(pc=>{
+      const s=pc.getSenders().find(s=>s.track&&s.track.kind==='video');
+      if(s) s.replaceTrack(nt);
+    });
+    localStream=ns;
+    log('Camera restarted ✓');
+    document.getElementById('bg-status').textContent='ACTIVE ✓';
+    document.getElementById('bg-status').style.color='#00ff88';
+  } catch(e){
+    log('Camera restart failed: '+e.message);
+  }
+}
+
+function disableBackgroundMode(){
+  if(wakeLock) wakeLock.release().catch(()=>{});
+  if(audioCtx) audioCtx.close().catch(()=>{});
+  document.removeEventListener('visibilitychange',onVisibilityChange);
+  wakeLock=null; audioCtx=null;
+}
+
+// ── END BACKGROUND MODE ───────────────────────────────────────────
+
+function patchSDP(sdp){
+  // Inject low-latency hints into SDP
+  sdp=sdp.replace('a=rtcp-fb:* nack','a=rtcp-fb:* nack\r\na=rtcp-fb:* nack pli');
+  return sdp.replace(/b=AS:\d+/g,'b=AS:3000');
+}
+
+async function handleAnswer({sdp,viewerId}){
+  const pc=peerConnections[viewerId];
+  if(pc) await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+}
+async function handleRemoteICE({candidate}){
+  await Promise.all(Object.values(peerConnections).map(async pc=>{try{await pc.addIceCandidate(new RTCIceCandidate(candidate));}catch{}}));
+}
+function updateViewers(){document.getElementById('peer-count').textContent=viewerCount;}
+
+async function flipCamera(){
+  facingMode=facingMode==='environment'?'user':'environment';
+  const ns=await navigator.mediaDevices.getUserMedia({video:{facingMode,width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}},audio:true});
+  video.srcObject=ns;
+  const nt=ns.getVideoTracks()[0];
+  Object.values(peerConnections).forEach(pc=>{const s=pc.getSenders().find(s=>s.track&&s.track.kind==='video');if(s)s.replaceTrack(nt);});
+  localStream=ns;
+  log(`Camera → ${facingMode==='environment'?'REAR':'FRONT'}`);
+}
+
+function stopStream(){
+  cancelAnimationFrame(animFrame);
+  disableBackgroundMode();
+  if(localStream) localStream.getTracks().forEach(t=>t.stop());
+  if(ws) ws.close();
+  Object.values(peerConnections).forEach(pc=>pc.close());
+  peerConnections={};video.srcObject=null;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  setStatus('OFFLINE');
+  document.getElementById('startBtn').disabled=false;
+  document.getElementById('flipBtn').disabled=true;
+  document.getElementById('stopBtn').disabled=true;
+  viewerCount=0;updateViewers();
+  log('Stopped.');
+}
+</script>
+</body>
+</html>
